@@ -1,0 +1,12 @@
+# Git
+.git/**
+.gitignore
+
+# Docs
+README.md
+
+# Config local
+.env
+
+# macOS
+.DS_Store
