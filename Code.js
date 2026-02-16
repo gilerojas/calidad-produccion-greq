@@ -1,19 +1,23 @@
 /**
  * ═══════════════════════════════════════════════════════════════
- * SCRIPT CCG v2.4 - MENTIONS A MAURO EN NOTIFICACIONES
- * 
+ * SCRIPT CCG v2.6
+ *
+ * CHANGELOG v2.6:
+ * - Notificación "Nuevo pedido en QC" con mention a Mauro cuando entra un pedido sin ORIGEN
+ * - Se envía una sola vez por pedido (Script Properties)
+ *
+ * CHANGELOG v2.5:
+ * - Refactor: una sola función enviarWhatsApp(mensaje, mentionJID?)
+ * - Helper obtenerDatosPedido(), mensajes más naturales
+ *
  * CHANGELOG v2.4:
- * - Agregado sistema de mentions para alertar a Mauro
- * - Notificación cuando pedido entra a CCG (PENDIENTE)
- * - Notificación cuando pedido está listo para QC (PRODUCCION/MIXTO)
- * 
+ * - Sistema de mentions para alertar a Mauro
+ * - Notificación cuando pedido entra a CCG / listo para QC (PRODUCCION/MIXTO)
+ *
  * CHANGELOG v2.3:
- * - Agregado origen "MIXTO" (Se comporta como Producción)
- * - Validaciones de QC aplican para PRODUCCION y MIXTO
- * 
- * FIXES v2.2:
- * - Sistema de archivado automático
- * - Cálculo de tiempos
+ * - Origen "MIXTO" (como Producción). Validaciones QC para PRODUCCION y MIXTO
+ *
+ * v2.2: Archivado automático, cálculo de tiempos
  * ═══════════════════════════════════════════════════════════════
  */
 
@@ -66,6 +70,19 @@ function onEdit(e) {
   // Obtenemos el ID del pedido siempre para tenerlo disponible
   const pedId = sheet.getRange(row, CONFIG.COL.PED_ID).getValue();
   if (!pedId) return;
+
+  // ═══════════════════════════════════════════════════════════
+  // CASO 0: NUEVO PEDIDO EN CCG (ORIGEN vacío) → notificar una vez a Mauro
+  // ═══════════════════════════════════════════════════════════
+  const origen = sheet.getRange(row, CONFIG.COL.ORIGEN).getValue();
+  if (!origen) {
+    const key = "NUEVO_PED_" + String(pedId).replace(/\s/g, "_");
+    const props = PropertiesService.getScriptProperties();
+    if (!props.getProperty(key)) {
+      notificarNuevoPedido(sheet, row);
+      props.setProperty(key, "1");
+    }
+  }
 
   // ═══════════════════════════════════════════════════════════
   // CASO 1: DETECTAR CAMBIO EN "ORIGEN" (Incluso si es Copy/Paste)
@@ -429,125 +446,78 @@ function moverAprobados() {
     const lastRow = shAprobados.getLastRow();
     shAprobados.getRange(lastRow + 1, 1, filasAMover.length, 17)
       .setValues(filasAMover);
-    
-    // Eliminar de CCG
     filasAEliminar.reverse().forEach(rowNum => {
       shCCG.deleteRow(rowNum);
     });
-    
-    notificarArchivadoAprobados(filasAMover.length);
   }
 }
 
 // ══════════════════════════════════════════════════════════════
-// NOTIFICACIONES WHATSAPP CON MENTIONS
+// NOTIFICACIONES WHATSAPP
 // ══════════════════════════════════════════════════════════════
 
+/** Devuelve { pedId, cliente, producto, color } y opcionalmente viscosidad, pH */
+function obtenerDatosPedido(sheet, row) {
+  return {
+    pedId: sheet.getRange(row, CONFIG.COL.PED_ID).getValue(),
+    cliente: sheet.getRange(row, CONFIG.COL.CLIENTE).getValue(),
+    producto: sheet.getRange(row, CONFIG.COL.PRODUCTO).getValue(),
+    color: sheet.getRange(row, CONFIG.COL.COLOR).getValue(),
+    viscosidad: sheet.getRange(row, CONFIG.COL.VISCOSIDAD).getValue(),
+    pH: sheet.getRange(row, CONFIG.COL.PH).getValue()
+  };
+}
+
+/** Respaldo: notificación cuando alguien EDITA en CCG una fila con ORIGEN vacío. La notificación principal "Nuevo pedido → QC" se envía desde QCBridge (CPG) al mandar a Calidad. */
+function notificarNuevoPedido(sheet, row) {
+  const d = obtenerDatosPedido(sheet, row);
+  const cantidad = sheet.getRange(row, CONFIG.COL.CANTIDAD).getValue();
+  const unidad = sheet.getRange(row, CONFIG.COL.UNIDAD).getValue();
+  const cant = cantidad && unidad ? `${cantidad} ${unidad}` : cantidad || "—";
+  const msg = `Nuevo pedido en QC: ${d.pedId} — ${d.cliente}, ${d.producto} ${d.color} (${cant}). Por favor indicar ORIGEN en CCG: ¿salió de STOCK o viene de PRODUCCIÓN/MIXTO?`;
+  enviarWhatsApp(msg, CONFIG.MAURO_JID);
+}
+
 function notificarStockAprobado(sheet, row, metricas) {
-  const pedId = sheet.getRange(row, CONFIG.COL.PED_ID).getValue();
-  const cliente = sheet.getRange(row, CONFIG.COL.CLIENTE).getValue();
-  const producto = sheet.getRange(row, CONFIG.COL.PRODUCTO).getValue();
-  const color = sheet.getRange(row, CONFIG.COL.COLOR).getValue();
-  
-  let msg = `📦 *QC APROBADO - STOCK*\n`;
-  msg += `.............................\n`;
-  msg += `*ID:* ${pedId}\n`;
-  msg += `*Cliente:* ${cliente}\n`;
-  msg += `*Producto:* ${producto} ${color}\n`;
-  msg += `*Origen:* Inventario existente\n`;
-  
+  const d = obtenerDatosPedido(sheet, row);
+  let msg = `📦 Listo: ${d.pedId} — ${d.cliente}, ${d.producto} ${d.color} (stock).`;
   if (metricas && metricas.tiempoTotalFmt) {
-    msg += `\n⏱️ *Tiempo total:* ${metricas.tiempoTotalFmt}\n`;
+    msg += ` Tiempo: ${metricas.tiempoTotalFmt}.`;
   }
-  
-  msg += `\n🚀 *ACCIÓN:* Listo para despachar\n`;
-  msg += `.............................`;
-  
-  enviarWhatsApp(msg); // Sin mention
+  msg += ` Listo para despachar.`;
+  enviarWhatsApp(msg);
 }
 
 function notificarProduccionPendiente(sheet, row, origen) {
-  const pedId = sheet.getRange(row, CONFIG.COL.PED_ID).getValue();
-  const cliente = sheet.getRange(row, CONFIG.COL.CLIENTE).getValue();
-  const producto = sheet.getRange(row, CONFIG.COL.PRODUCTO).getValue();
-  const color = sheet.getRange(row, CONFIG.COL.COLOR).getValue();
-  
-  let msg = `🏭 *${origen} DETECTADO*\n`;
-  msg += `.............................\n`;
-  msg += `*ID:* ${pedId}\n`;
-  msg += `*Cliente:* ${cliente}\n`;
-  msg += `*Producto:* ${producto} ${color}\n`;
-  msg += `\n⏳ *Esperando:*\n`;
-  msg += `• Manufactura completa\n`;
-  msg += `• Datos técnicos de QC\n`;
-  msg += `\n📞 @18099530116 - Revisar cuando esté listo\n`;
-  msg += `.............................`;
-  
-  enviarWhatsAppConMention(msg, CONFIG.MAURO_JID); // CON mention
+  const d = obtenerDatosPedido(sheet, row);
+  const msg = `${d.pedId} — ${d.cliente}, ${d.producto} ${d.color}. Entró como ${origen}; cuando tengan los datos de QC (gls, viscosidad, pH) avisen para aprobar.`;
+  enviarWhatsApp(msg, CONFIG.MAURO_JID);
 }
 
 function notificarProduccionAprobada(sheet, row, metricas, origen) {
-  const pedId = sheet.getRange(row, CONFIG.COL.PED_ID).getValue();
-  const cliente = sheet.getRange(row, CONFIG.COL.CLIENTE).getValue();
-  const producto = sheet.getRange(row, CONFIG.COL.PRODUCTO).getValue();
-  const color = sheet.getRange(row, CONFIG.COL.COLOR).getValue();
-  const viscosidad = sheet.getRange(row, CONFIG.COL.VISCOSIDAD).getValue();
-  const pH = sheet.getRange(row, CONFIG.COL.PH).getValue();
-  
-  let msg = `✅ *QC APROBADO - ${origen}*\n`;
-  msg += `.............................\n`;
-  msg += `*ID:* ${pedId}\n`;
-  msg += `*Cliente:* ${cliente}\n`;
-  msg += `*Producto:* ${producto} ${color}\n`;
-  msg += `*Viscosidad:* ${viscosidad} KU\n`;
-  msg += `*pH:* ${pH}\n`;
-  
-  if (metricas) {
-    msg += `\n⏱️ *TIEMPOS*\n`;
-    if (metricas.tiempoProduccionFmt) {
-      msg += `Proceso: *${metricas.tiempoProduccionFmt}*\n`;
-    }
-    if (metricas.tiempoCalidadFmt) {
-      msg += `Calidad: *${metricas.tiempoCalidadFmt}*\n`;
-    }
-    if (metricas.tiempoTotalFmt) {
-      msg += `Total: *${metricas.tiempoTotalFmt}*\n`;
-    }
+  const d = obtenerDatosPedido(sheet, row);
+  let msg = `✅ Aprobado: ${d.pedId} — ${d.cliente}, ${d.producto} ${d.color}. ${d.viscosidad} KU, pH ${d.pH}.`;
+  if (metricas && metricas.tiempoTotalFmt) {
+    msg += ` Tiempo total: ${metricas.tiempoTotalFmt}.`;
   }
-  
-  msg += `\n🚀 *ACCIÓN:* Listo para despachar\n`;
-  msg += `.............................`;
-  
-  enviarWhatsApp(msg); // Sin mention
-}
-
-function notificarArchivadoAprobados(cantidad) {
-  // Silencioso - no notificar archivados automáticos
+  msg += ` Listo para despachar.`;
+  enviarWhatsApp(msg);
 }
 
 // ══════════════════════════════════════════════════════════════
-// FUNCIONES DE ENVÍO WHATSAPP
+// ENVÍO WHATSAPP (mensaje; mentionJID opcional)
 // ══════════════════════════════════════════════════════════════
 
-/**
- * Envío estándar sin mentions
- */
-function enviarWhatsApp(mensaje) {
+function enviarWhatsApp(mensaje, mentionJID) {
   const props = PropertiesService.getScriptProperties();
   const WAS_TOKEN = props.getProperty('WAS_TOKEN');
   const GROUP_ID = props.getProperty('GROUP_GREQ_TECNICO');
-  
   if (!WAS_TOKEN || !GROUP_ID) {
     Logger.log("⚠️ Token o Grupo no configurado");
     return;
   }
-  
-  const url = "https://www.wasenderapi.com/api/send-message";
-  const payload = {
-    to: GROUP_ID,
-    text: mensaje
-  };
-  
+  const payload = { to: GROUP_ID, text: mensaje };
+  if (mentionJID) payload.mentions = [mentionJID];
   const options = {
     method: 'post',
     contentType: 'application/json',
@@ -555,49 +525,10 @@ function enviarWhatsApp(mensaje) {
     payload: JSON.stringify(payload),
     muteHttpExceptions: true
   };
-  
   try {
-    const response = UrlFetchApp.fetch(url, options);
-    const code = response.getResponseCode();
+    const code = UrlFetchApp.fetch("https://www.wasenderapi.com/api/send-message", options).getResponseCode();
     Logger.log(`📱 WhatsApp enviado: ${code}`);
   } catch (error) {
     Logger.log(`❌ Error WhatsApp: ${error}`);
-  }
-}
-
-/**
- * Envío CON mention
- */
-function enviarWhatsAppConMention(mensaje, mentionJID) {
-  const props = PropertiesService.getScriptProperties();
-  const WAS_TOKEN = props.getProperty('WAS_TOKEN');
-  const GROUP_ID = props.getProperty('GROUP_GREQ_TECNICO');
-  
-  if (!WAS_TOKEN || !GROUP_ID) {
-    Logger.log("⚠️ Token o Grupo no configurado");
-    return;
-  }
-  
-  const url = "https://www.wasenderapi.com/api/send-message";
-  const payload = {
-    to: GROUP_ID,
-    text: mensaje,
-    mentions: [mentionJID]  // Array con JID de Mauro
-  };
-  
-  const options = {
-    method: 'post',
-    contentType: 'application/json',
-    headers: { Authorization: `Bearer ${WAS_TOKEN}` },
-    payload: JSON.stringify(payload),
-    muteHttpExceptions: true
-  };
-  
-  try {
-    const response = UrlFetchApp.fetch(url, options);
-    const code = response.getResponseCode();
-    Logger.log(`📱 WhatsApp con mention enviado: ${code}`);
-  } catch (error) {
-    Logger.log(`❌ Error WhatsApp mention: ${error}`);
   }
 }
